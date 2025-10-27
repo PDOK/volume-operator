@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -57,7 +58,6 @@ type VolumePopulatorReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
 // the VolumePopulator object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
@@ -79,7 +79,7 @@ func (r *VolumePopulatorReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	deployment, err := getOwningDeploymentFromResultSet(ctx, r, rs)
+	deployment, err := getOwningDeploymentFromResultSet(ctx, r.Client, rs)
 	if deployment == nil || err != nil {
 		logger.Error(err, "Failed to get owning Deployment")
 		return ctrl.Result{}, err
@@ -105,13 +105,13 @@ func (r *VolumePopulatorReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	hash := sha256.Sum256([]byte(blobPrefix + volumePath + storageCapacity))
 	volumeName := "populator-" + string(hash[:8])
 
-	pvc, err := createPvcIfNotExists(r, ctx, volumeName, rs.Namespace, storageCapacity)
+	pvc, err := createPvcIfNotExists(ctx, r.Client, volumeName, rs.Namespace, storageCapacity)
 	if err != nil {
 		logger.Error(err, "Failed to create PVC")
 		return ctrl.Result{}, err
 	}
 
-	volumepopulator, err := createAvpIfNotExists(r, ctx, volumeName, rs.Namespace, blobPrefix, volumePath, storageCapacity)
+	volumepopulator, err := createAvpIfNotExists(ctx, r.Client, volumeName, rs.Namespace, blobPrefix, volumePath)
 	if err != nil {
 		logger.Error(err, "Failed to create AzureVolumePopulator")
 		return ctrl.Result{}, err
@@ -128,7 +128,7 @@ func (r *VolumePopulatorReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{}, err
 }
 
-func createPvcIfNotExists(obj client.Client, ctx context.Context, volumeName string, namespace string, storageCapacity string) (corev1.PersistentVolumeClaim, error) {
+func createPvcIfNotExists(ctx context.Context, obj client.Client, volumeName string, namespace string, storageCapacity string) (corev1.PersistentVolumeClaim, error) {
 	logger := logf.FromContext(ctx)
 	pvc := corev1.PersistentVolumeClaim{}
 	err := obj.Get(ctx, types.NamespacedName{
@@ -167,10 +167,10 @@ func createPvcIfNotExists(obj client.Client, ctx context.Context, volumeName str
 	return pvc, err
 }
 
-func createAvpIfNotExists(r *VolumePopulatorReconciler, ctx context.Context, name string, namespace string, prefix string, path string, capacity string) (avp.AzureVolumePopulator, error) {
+func createAvpIfNotExists(ctx context.Context, obj client.Client, name string, namespace string, prefix string, path string) (avp.AzureVolumePopulator, error) {
 	logger := logf.FromContext(ctx)
 	populator := avp.AzureVolumePopulator{}
-	err := r.Get(ctx, types.NamespacedName{
+	err := obj.Get(ctx, types.NamespacedName{
 		Name:      name,
 		Namespace: namespace,
 	}, &populator)
@@ -188,7 +188,7 @@ func createAvpIfNotExists(r *VolumePopulatorReconciler, ctx context.Context, nam
 				BlobDownloadOptions: &avp.BlobDownloadOptions{},
 			},
 		}
-		err = r.Create(ctx, &populator)
+		err = obj.Create(ctx, &populator)
 		if err != nil {
 			logger.Error(err, "Failed to create AzureVolumePopulator")
 			return populator, err

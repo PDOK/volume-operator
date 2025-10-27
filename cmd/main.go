@@ -35,7 +35,6 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	pdoknlv1alpha1 "github.com/PDOK/volume-operator/api/v1alpha1"
 	"github.com/PDOK/volume-operator/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
@@ -47,12 +46,10 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-
-	utilruntime.Must(pdoknlv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
-// nolint:gocyclo
+//nolint:gocyclo,funlen
 func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
