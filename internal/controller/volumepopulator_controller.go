@@ -34,16 +34,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	pdoknlv1alpha1 "github.com/PDOK/volume-operator/api/v1alpha1"
 	avp "github.com/pdok/azure-volume-populator/api/v1alpha1"
 )
 
 const (
-	controllerName = "volumepopulator-controller"
+	controllerName = "volumeoperator"
 )
 
 var (
-	finalizerName = controllerName + "." + pdoknlv1alpha1.GroupVersion.Group + "/finalizer"
+	finalizerName = controllerName + "." + "volume.pdok.nl" + "/finalizer"
 )
 
 // VolumePopulatorReconciler reconciles a VolumePopulator object
@@ -117,7 +116,6 @@ func (r *VolumePopulatorReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		logger.Error(err, "Failed to create AzureVolumePopulator")
 		return ctrl.Result{}, err
 	}
-
 	shouldContinue, err := finalizeIfNecessary(ctx, r.Client, &rs, finalizerName, func() error {
 		logger.Info("Deleting for VolumePopulator", "name", volumeName)
 		return r.deleteAllForVolumePopulator(ctx, &volumepopulator, &pvc)
@@ -126,8 +124,6 @@ func (r *VolumePopulatorReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if !shouldContinue || err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-
-	// todo: if it should continue, what's next
 
 	return ctrl.Result{}, err
 }

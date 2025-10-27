@@ -9,12 +9,4 @@ layout:
 projectName: volume-operator
 repo: github.com/PDOK/volume-operator
 resources:
-- api:
-    crdVersion: v1
-    namespaced: true
-  controller: true
-  domain: pdok.nl
-  kind: VolumePopulator
-  path: github.com/PDOK/volume-operator/api/v1alpha1
-  version: v1alpha1
 version: "3"
