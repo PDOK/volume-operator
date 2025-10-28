@@ -61,18 +61,3 @@ jobs:
         run: |
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-      - name: Build result notification
-        if: success() || failure()
-        uses: 8398a7/action-slack@v3
-        with:
-          fields: all
-          status: custom
-          custom_payload: |
-            {
-              attachments: [{
-                color: '${{ job.status }}' === 'success' ? 'good' : '${{ job.status }}' === 'failure' ? 'danger' : 'warning',
-                text: `${process.env.AS_WORKFLOW} ${{ job.status }} for ${process.env.AS_REPO}!\n${process.env.AS_JOB} job on ${process.env.AS_REF} (commit: ${process.env.AS_COMMIT}, version: ${{ steps.docker_meta.outputs.version }}) by ${process.env.AS_AUTHOR} took ${process.env.AS_TOOK}`,
-              }]
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
