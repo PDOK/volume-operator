@@ -19,32 +19,47 @@ package controller
 import (
 	"context"
 
-	avp "github.com/pdok/azure-volume-populator/api/v1alpha1"
-
 	. "github.com/onsi/ginkgo/v2" //nolint:revive // ginkgo bdd
 	. "github.com/onsi/gomega"    //nolint:revive // ginkgo bdd
+	avp "github.com/pdok/azure-volume-populator/api/v1alpha1"
+	v1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-var _ = Describe("VolumePopulator Controller", func() {
+var _ = Describe("Volume Controller", func() {
+	var (
+		ctx    context.Context
+		scheme *runtime.Scheme
+		client client.Client
+	)
+
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
-
-		ctx := context.Background()
+		ctx = context.Background()
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
 			Namespace: "default", // TODO(user):Modify as needed
 		}
+
 		volumepopulator := &avp.AzureVolumePopulator{}
 
 		BeforeEach(func() {
 			By("creating the custom resource for the Kind VolumePopulator")
-			err := k8sClient.Get(ctx, typeNamespacedName, volumepopulator)
+			scheme = runtime.NewScheme()
+			_ = v1.AddToScheme(scheme)
+			_ = avp.AddToScheme(scheme)
+			client = fake.NewClientBuilder().
+				WithScheme(scheme).
+				Build()
+
+			err := client.Get(ctx, typeNamespacedName, volumepopulator)
 			if err != nil && errors.IsNotFound(err) {
 				resource := &avp.AzureVolumePopulator{
 					ObjectMeta: metav1.ObjectMeta{
@@ -53,24 +68,25 @@ var _ = Describe("VolumePopulator Controller", func() {
 					},
 					// TODO(user): Specify other spec details if needed.
 				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+				Expect(client.Create(ctx, resource)).To(Succeed())
 			}
 		})
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &avp.AzureVolumePopulator{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
+			err := client.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
 			By("Cleanup the specific resource instance VolumePopulator")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			Expect(client.Delete(ctx, resource)).To(Succeed())
 		})
+
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := &VolumePopulatorReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+			controllerReconciler := &VolumeReconciler{
+				Client: client,
+				Scheme: scheme,
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{

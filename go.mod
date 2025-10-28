@@ -5,7 +5,7 @@ go 1.24.5
 require (
 	github.com/onsi/ginkgo/v2 v2.22.1
 	github.com/onsi/gomega v1.36.2
-	github.com/pdok/azure-volume-populator v0.1.0
+	github.com/pdok/azure-volume-populator v0.1.1
 	k8s.io/api v0.34.0
 	k8s.io/apimachinery v0.34.0
 	k8s.io/client-go v0.34.0

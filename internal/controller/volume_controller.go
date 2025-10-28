@@ -46,8 +46,8 @@ var (
 	finalizerName = controllerName + "." + "volume.pdok.nl" + "/finalizer"
 )
 
-// VolumePopulatorReconciler reconciles a VolumePopulator object
-type VolumePopulatorReconciler struct {
+// VolumeReconciler reconciles a VolumePopulator object
+type VolumeReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
@@ -64,7 +64,7 @@ type VolumePopulatorReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.22.1/pkg/reconcile
-func (r *VolumePopulatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 
 	var rs appsv1.ReplicaSet
@@ -73,10 +73,9 @@ func (r *VolumePopulatorReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("ReplicaSet not found, skipping reconciliation")
-			return ctrl.Result{}, err
 		}
 		logger.Error(err, "Failed to get ReplicaSet")
-		return ctrl.Result{}, err
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	deployment, err := getOwningDeploymentFromResultSet(ctx, r.Client, rs)
@@ -103,7 +102,7 @@ func (r *VolumePopulatorReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	hash := sha256.Sum256([]byte(blobPrefix + volumePath + storageCapacity))
-	volumeName := "populator-" + string(hash[:8])
+	volumeName := "volume-" + string(hash[:8])
 
 	pvc, err := createPvcIfNotExists(ctx, r.Client, volumeName, rs.Namespace, storageCapacity)
 	if err != nil {
@@ -117,8 +116,8 @@ func (r *VolumePopulatorReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 	shouldContinue, err := finalizeIfNecessary(ctx, r.Client, &rs, finalizerName, func() error {
-		logger.Info("Deleting for VolumePopulator", "name", volumeName)
-		return r.deleteAllForVolumePopulator(ctx, &volumepopulator, &pvc)
+		logger.Info("Deleting for Volume", "name", volumeName)
+		return r.deleteAllForVolume(ctx, &volumepopulator, &pvc)
 	})
 
 	if !shouldContinue || err != nil {
@@ -257,7 +256,7 @@ func getObjectFullName(c client.Client, obj client.Object) string {
 		groupVersionKind.Kind + "/" +
 		key.String()
 }
-func (r *VolumePopulatorReconciler) deleteAllForVolumePopulator(ctx context.Context, avp *avp.AzureVolumePopulator, pvc *corev1.PersistentVolumeClaim) error {
+func (r *VolumeReconciler) deleteAllForVolume(ctx context.Context, avp *avp.AzureVolumePopulator, pvc *corev1.PersistentVolumeClaim) error {
 	return deleteObjects(ctx, r.Client, []client.Object{
 		avp,
 		pvc,
@@ -265,7 +264,7 @@ func (r *VolumePopulatorReconciler) deleteAllForVolumePopulator(ctx context.Cont
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *VolumePopulatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *VolumeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1.ReplicaSet{}).
 		Owns(&avp.AzureVolumePopulator{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
