@@ -4,8 +4,6 @@ env:
   image: pdok/volume-operator
 on:
   push:
-    tags:
-      - '*'
 jobs:
   docker:
     runs-on: ubuntu-latest
