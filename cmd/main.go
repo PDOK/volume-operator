@@ -21,6 +21,7 @@ import (
 	"flag"
 	"os"
 
+	avp "github.com/pdok/azure-volume-populator/api/v1alpha1"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -175,9 +176,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	scheme := mgr.GetScheme()
+
+	if err := avp.AddToScheme(scheme); err != nil {
+		setupLog.Error(err, "unable to add AzureVolumePopulator scheme")
+		os.Exit(1)
+	}
+
 	if err := (&controller.VolumeReconciler{
 		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Scheme: scheme,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Volume")
 		os.Exit(1)
