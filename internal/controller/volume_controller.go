@@ -134,9 +134,15 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		logger.Error(err, "Failed to create PVC")
 		return ctrl.Result{}, err
 	}
+	//
+	//err = createPVCBinderPod(ctx, r.Client, pvc)
+	//if err != nil {
+	//	logger.Error(err, "Failed to create PVCBinder pod")
+	//	return ctrl.Result{}, err
+	//}
 
-	//ephemeralName := pvc.Name + "-clone"
-	ephemeralName := pvc.Name
+	ephemeralName := pvc.Name + "-clone"
+	//ephemeralName := pvc.Name
 	if !deploymentHasVolume(deployment, ephemeralName) {
 		err = mountPvcToDeployment(ctx, r.Client, deployment, ephemeralName, &pvc)
 	}
@@ -149,36 +155,33 @@ func mountPvcToDeployment(ctx context.Context, c client.Client, deployment *apps
 	if storageClassName == "" {
 		storageClassName = "managed-premium-zrs"
 	}
-	//storageCapacity := deployment.Annotations["volume-operator.pdok.nl/storage-capacity"]
+	storageCapacity := deployment.Annotations["volume-operator.pdok.nl/storage-capacity"]
 
 	patch := client.MergeFrom(deployment.DeepCopy())
 
 	deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, corev1.Volume{
 		Name: name,
 		VolumeSource: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-				ClaimName: pvc.Name,
+			Ephemeral: &corev1.EphemeralVolumeSource{
+				VolumeClaimTemplate: &corev1.PersistentVolumeClaimTemplate{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{
+							corev1.ReadWriteOnce,
+						},
+						StorageClassName: &storageClassName,
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse(storageCapacity),
+							},
+						},
+						DataSource: &corev1.TypedLocalObjectReference{
+							APIGroup: StringPtr("v1"),
+							Kind:     pvc.Kind,
+							Name:     pvc.Name,
+						},
+					},
+				},
 			},
-			//Ephemeral: &corev1.EphemeralVolumeSource{
-			//	VolumeClaimTemplate: &corev1.PersistentVolumeClaimTemplate{
-			//		Spec: corev1.PersistentVolumeClaimSpec{
-			//			AccessModes: []corev1.PersistentVolumeAccessMode{
-			//				corev1.ReadWriteOnce,
-			//			},
-			//			StorageClassName: &storageClassName,
-			//			Resources: corev1.VolumeResourceRequirements{
-			//				Requests: corev1.ResourceList{
-			//					corev1.ResourceStorage: resource.MustParse(storageCapacity),
-			//				},
-			//			},
-			//			DataSource: &corev1.TypedLocalObjectReference{
-			//				APIGroup: StringPtr("v1"),
-			//				Kind:     pvc.Kind,
-			//				Name:     pvc.Name,
-			//			},
-			//		},
-			//	},
-			//},
 		},
 	})
 
@@ -262,10 +265,9 @@ func createPvcIfNotExists(ctx context.Context, obj client.Client, populator avp.
 					},
 				},
 				DataSourceRef: &corev1.TypedObjectReference{
-					APIGroup:  StringPtr(avp.GroupVersion.Group),
-					Kind:      populator.Kind,
-					Name:      populator.Name,
-					Namespace: StringPtr("azurevolumepopulator"),
+					APIGroup: StringPtr(avp.GroupVersion.Group),
+					Kind:     populator.Kind,
+					Name:     populator.Name,
 				},
 			},
 		}
