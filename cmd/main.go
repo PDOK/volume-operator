@@ -47,6 +47,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(avp.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -176,16 +177,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	scheme := mgr.GetScheme()
-
-	if err := avp.AddToScheme(scheme); err != nil {
-		setupLog.Error(err, "unable to add AzureVolumePopulator scheme")
-		os.Exit(1)
-	}
-
 	if err := (&controller.VolumeReconciler{
 		Client: mgr.GetClient(),
-		Scheme: scheme,
+		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Volume")
 		os.Exit(1)

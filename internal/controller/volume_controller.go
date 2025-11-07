@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -29,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	"k8s.io/apimachinery/pkg/api/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -68,21 +67,39 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	logger := logf.FromContext(ctx)
 
 	var rs appsv1.ReplicaSet
-
 	err := r.Get(ctx, req.NamespacedName, &rs)
+
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) {
 			logger.Info("ReplicaSet not found, skipping reconciliation")
+		} else {
+			logger.Error(err, "Failed to get ReplicaSet")
 		}
-		logger.Error(err, "Failed to get ReplicaSet")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	deployment, err := getOwningDeploymentFromResultSet(ctx, r.Client, rs)
+	deployment, err := getOwningDeploymentFromReplicaSet(ctx, r.Client, rs)
 	if deployment == nil || err != nil {
 		logger.Error(err, "Failed to get owning Deployment")
+		//err = r.deleteAllForReplicaSet(ctx, &rs, "")
 		return ctrl.Result{}, err
 	}
+
+	resourceSuffix := deployment.Annotations["volume-operator.pdok.nl/resource-suffix"]
+	if resourceSuffix == "" {
+		logger.Info("Missing required resource suffix annotation")
+		return ctrl.Result{}, nil
+	}
+	//
+	//shouldContinue, err := finalizeIfNecessary(ctx, r.Client, &rs, finalizerName, func() error {
+	//	logger.Info("Deleting for replicaset", "name", rs.Name)
+	//	return r.deleteAllForReplicaSet(ctx, &rs, resourceSuffix)
+	//})
+	//
+	//if !shouldContinue || err != nil {
+	//	err = client.IgnoreNotFound(err)
+	//	return ctrl.Result{}, client.IgnoreNotFound(err)
+	//}
 
 	rsRevision := rs.Annotations["deployment.kubernetes.io/revision"]
 	deploymentRevision := deployment.Annotations["deployment.kubernetes.io/revision"]
@@ -101,48 +118,141 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-	hash := sha256.Sum256([]byte(blobPrefix + volumePath + storageCapacity))
-	volumeName := "volume-" + string(hash[:8])
+	volumepopulator, err := createAvpIfNotExists(ctx, r.Client, resourceSuffix, rs.Namespace, blobPrefix, volumePath)
+	if err != nil {
+		logger.Error(err, "Failed to create AzureVolumePopulator")
+		return ctrl.Result{}, err
+	}
 
-	pvc, err := createPvcIfNotExists(ctx, r.Client, volumeName, rs.Namespace, storageCapacity)
+	storageClassName := deployment.Annotations["volume-operator.pdok.nl/storage-class-name"]
+	if storageClassName == "" {
+		storageClassName = "managed-premium-zrs"
+	}
+
+	pvc, err := createPvcIfNotExists(ctx, r.Client, volumepopulator, resourceSuffix, rs.Namespace, storageClassName, storageCapacity)
 	if err != nil {
 		logger.Error(err, "Failed to create PVC")
 		return ctrl.Result{}, err
 	}
 
-	volumepopulator, err := createAvpIfNotExists(ctx, r.Client, volumeName, rs.Namespace, blobPrefix, volumePath)
-	if err != nil {
-		logger.Error(err, "Failed to create AzureVolumePopulator")
-		return ctrl.Result{}, err
-	}
-	shouldContinue, err := finalizeIfNecessary(ctx, r.Client, &rs, finalizerName, func() error {
-		logger.Info("Deleting for Volume", "name", volumeName)
-		return r.deleteAllForVolume(ctx, &volumepopulator, &pvc)
-	})
-
-	if !shouldContinue || err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+	//ephemeralName := pvc.Name + "-clone"
+	ephemeralName := pvc.Name
+	if !deploymentHasVolume(deployment, ephemeralName) {
+		err = mountPvcToDeployment(ctx, r.Client, deployment, ephemeralName, &pvc)
 	}
 
 	return ctrl.Result{}, err
 }
 
-func createPvcIfNotExists(ctx context.Context, obj client.Client, volumeName string, namespace string, storageCapacity string) (corev1.PersistentVolumeClaim, error) {
-	logger := logf.FromContext(ctx)
+func mountPvcToDeployment(ctx context.Context, c client.Client, deployment *appsv1.Deployment, name string, pvc *corev1.PersistentVolumeClaim) error {
+	storageClassName := deployment.Annotations["volume-operator.pdok.nl/storage-class-name"]
+	if storageClassName == "" {
+		storageClassName = "managed-premium-zrs"
+	}
+	//storageCapacity := deployment.Annotations["volume-operator.pdok.nl/storage-capacity"]
+
+	patch := client.MergeFrom(deployment.DeepCopy())
+
+	deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: name,
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: pvc.Name,
+			},
+			//Ephemeral: &corev1.EphemeralVolumeSource{
+			//	VolumeClaimTemplate: &corev1.PersistentVolumeClaimTemplate{
+			//		Spec: corev1.PersistentVolumeClaimSpec{
+			//			AccessModes: []corev1.PersistentVolumeAccessMode{
+			//				corev1.ReadWriteOnce,
+			//			},
+			//			StorageClassName: &storageClassName,
+			//			Resources: corev1.VolumeResourceRequirements{
+			//				Requests: corev1.ResourceList{
+			//					corev1.ResourceStorage: resource.MustParse(storageCapacity),
+			//				},
+			//			},
+			//			DataSource: &corev1.TypedLocalObjectReference{
+			//				APIGroup: StringPtr("v1"),
+			//				Kind:     pvc.Kind,
+			//				Name:     pvc.Name,
+			//			},
+			//		},
+			//	},
+			//},
+		},
+	})
+
+	for i := range deployment.Spec.Template.Spec.Containers {
+		deployment.Spec.Template.Spec.Containers[i].VolumeMounts = append(deployment.Spec.Template.Spec.Containers[i].VolumeMounts, corev1.VolumeMount{
+			Name:      name,
+			MountPath: "/mnt/data",
+		})
+	}
+
+	return c.Patch(ctx, deployment, patch)
+}
+
+func createPVCBinderPod(ctx context.Context, client client.Client, pvc corev1.PersistentVolumeClaim) error {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "force-provision-" + pvc.Name,
+			Namespace: pvc.Namespace,
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:    "busybox",
+					Image:   "busybox",
+					Command: []string{"sleep", "3600"},
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      pvc.Name,
+							MountPath: "/data",
+						},
+					},
+				},
+			},
+			Volumes: []corev1.Volume{
+				{
+					Name: pvc.Name,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: pvc.Name,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	err := client.Create(ctx, pod)
+	return err
+}
+
+func createPvcIfNotExists(ctx context.Context, obj client.Client, populator avp.AzureVolumePopulator, suffix string, namespace string, storageClass string, storageCapacity string) (corev1.PersistentVolumeClaim, error) {
+	if storageClass == "" {
+		storageClass = "managed-premium-zrs"
+	}
+
+	volumeName := "volume-" + suffix
+	typeMeta := metav1.TypeMeta{
+		Kind: "PersistentVolumeClaim",
+	}
 	pvc := corev1.PersistentVolumeClaim{}
 	err := obj.Get(ctx, types.NamespacedName{
 		Name:      volumeName,
 		Namespace: namespace,
 	}, &pvc)
 
-	if errors.IsNotFound(err) {
-		logger.Info("PVC not found, creating new one")
+	if k8serrors.IsNotFound(err) {
 		pvc = corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      volumeName,
 				Namespace: namespace,
 			},
+			TypeMeta: typeMeta,
 			Spec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: &storageClass,
 				AccessModes: []corev1.PersistentVolumeAccessMode{
 					corev1.ReadWriteOnce,
 				},
@@ -151,31 +261,41 @@ func createPvcIfNotExists(ctx context.Context, obj client.Client, volumeName str
 						corev1.ResourceStorage: resource.MustParse(storageCapacity),
 					},
 				},
+				DataSourceRef: &corev1.TypedObjectReference{
+					APIGroup:  StringPtr(avp.GroupVersion.Group),
+					Kind:      populator.Kind,
+					Name:      populator.Name,
+					Namespace: StringPtr("azurevolumepopulator"),
+				},
 			},
 		}
 
 		err = obj.Create(ctx, &pvc)
+		pvc.TypeMeta = typeMeta
 		if err != nil {
-			logger.Error(err, "Failed to create PVC")
 			return corev1.PersistentVolumeClaim{}, err
 		}
-		logger.Info("PVC created", "PVC", pvc)
-		return pvc, err
 	}
 
 	return pvc, err
 }
 
-func createAvpIfNotExists(ctx context.Context, obj client.Client, name string, namespace string, prefix string, path string) (avp.AzureVolumePopulator, error) {
-	logger := logf.FromContext(ctx)
+func createAvpIfNotExists(ctx context.Context, obj client.Client, suffix string, namespace string, prefix string, path string) (avp.AzureVolumePopulator, error) {
+	name := "avp-" + suffix
+
+	typeMeta := metav1.TypeMeta{
+		Kind:       "AzureVolumePopulator",
+		APIVersion: avp.GroupVersion.Group,
+	}
+
 	populator := avp.AzureVolumePopulator{}
 	err := obj.Get(ctx, types.NamespacedName{
 		Name:      name,
 		Namespace: namespace,
 	}, &populator)
+	populator.TypeMeta = typeMeta
 
-	if errors.IsNotFound(err) {
-		logger.Info("AzureVolumePopulator not found, creating new one")
+	if k8serrors.IsNotFound(err) {
 		populator = avp.AzureVolumePopulator{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
@@ -187,19 +307,16 @@ func createAvpIfNotExists(ctx context.Context, obj client.Client, name string, n
 				BlobDownloadOptions: &avp.BlobDownloadOptions{},
 			},
 		}
+
 		err = obj.Create(ctx, &populator)
-		if err != nil {
-			logger.Error(err, "Failed to create AzureVolumePopulator")
-			return populator, err
-		}
-		logger.Info("AzureVolumePopulator created", "AzureVolumePopulator", populator)
+		populator.TypeMeta = typeMeta
 		return populator, err
 	}
 
 	return populator, err
 }
 
-func getOwningDeploymentFromResultSet(ctx context.Context, c client.Client, rs appsv1.ReplicaSet) (*appsv1.Deployment, error) {
+func getOwningDeploymentFromReplicaSet(ctx context.Context, c client.Client, rs appsv1.ReplicaSet) (*appsv1.Deployment, error) {
 	deployment := &appsv1.Deployment{}
 
 	for _, oref := range rs.OwnerReferences {
@@ -224,7 +341,7 @@ func getOwningDeploymentFromResultSet(ctx context.Context, c client.Client, rs a
 func finalizeIfNecessary(ctx context.Context, c client.Client, obj client.Object, name string, f func() error) (bool, error) {
 	if obj.GetDeletionTimestamp().IsZero() {
 		if !controllerutil.ContainsFinalizer(obj, name) {
-			controllerutil.AddFinalizer(obj, name)
+			//controllerutil.AddFinalizer(obj, name)
 			err := c.Update(ctx, obj)
 			return true, err
 		}
@@ -256,11 +373,30 @@ func getObjectFullName(c client.Client, obj client.Object) string {
 		groupVersionKind.Kind + "/" +
 		key.String()
 }
-func (r *VolumeReconciler) deleteAllForVolume(ctx context.Context, avp *avp.AzureVolumePopulator, pvc *corev1.PersistentVolumeClaim) error {
-	return deleteObjects(ctx, r.Client, []client.Object{
-		avp,
-		pvc,
-	})
+
+func (r *VolumeReconciler) deleteAllForReplicaSet(ctx context.Context, rs *appsv1.ReplicaSet, suffix string) error {
+	var objectsToDelete []client.Object
+
+	if suffix != "" {
+		populator := &avp.AzureVolumePopulator{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      rs.GetName() + suffix,
+				Namespace: rs.Namespace,
+			},
+		}
+
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      rs.GetName() + suffix,
+				Namespace: rs.Namespace,
+			},
+		}
+
+		objectsToDelete = append(objectsToDelete, populator, pvc)
+	}
+
+	objectsToDelete = append(objectsToDelete, rs)
+	return deleteObjects(ctx, r.Client, objectsToDelete)
 }
 
 // SetupWithManager sets up the controller with the Manager.
