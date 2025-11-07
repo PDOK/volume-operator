@@ -25,7 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -38,12 +37,13 @@ import (
 )
 
 const (
-	controllerName = "volumeoperator"
+	controllerName      = "volumeoperator"
+	defaultStorageClass = "managed-premium-zrs"
 )
 
-var (
-	finalizerName = controllerName + "." + "volume.pdok.nl" + "/finalizer"
-)
+// var (
+//	finalizerName = controllerName + "." + "volume.pdok.nl" + "/finalizer"
+// )
 
 // VolumeReconciler reconciles a VolumePopulator object
 type VolumeReconciler struct {
@@ -63,6 +63,8 @@ type VolumeReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.22.1/pkg/reconcile
+//
+//nolint:cyclop,funlen
 func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 
@@ -81,7 +83,7 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	deployment, err := getOwningDeploymentFromReplicaSet(ctx, r.Client, rs)
 	if deployment == nil || err != nil {
 		logger.Error(err, "Failed to get owning Deployment")
-		//err = r.deleteAllForReplicaSet(ctx, &rs, "")
+		// err = r.deleteAllForReplicaSet(ctx, &rs, "")
 		return ctrl.Result{}, err
 	}
 
@@ -91,15 +93,15 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 	//
-	//shouldContinue, err := finalizeIfNecessary(ctx, r.Client, &rs, finalizerName, func() error {
+	// shouldContinue, err := finalizeIfNecessary(ctx, r.Client, &rs, finalizerName, func() error {
 	//	logger.Info("Deleting for replicaset", "name", rs.Name)
 	//	return r.deleteAllForReplicaSet(ctx, &rs, resourceSuffix)
-	//})
+	// })
 	//
-	//if !shouldContinue || err != nil {
+	// if !shouldContinue || err != nil {
 	//	err = client.IgnoreNotFound(err)
 	//	return ctrl.Result{}, client.IgnoreNotFound(err)
-	//}
+	// }
 
 	rsRevision := rs.Annotations["deployment.kubernetes.io/revision"]
 	deploymentRevision := deployment.Annotations["deployment.kubernetes.io/revision"]
@@ -126,7 +128,7 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	storageClassName := deployment.Annotations["volume-operator.pdok.nl/storage-class-name"]
 	if storageClassName == "" {
-		storageClassName = "managed-premium-zrs"
+		storageClassName = defaultStorageClass
 	}
 
 	pvc, err := createPvcIfNotExists(ctx, r.Client, volumepopulator, resourceSuffix, rs.Namespace, storageClassName, storageCapacity)
@@ -134,15 +136,15 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		logger.Error(err, "Failed to create PVC")
 		return ctrl.Result{}, err
 	}
-	//
-	//err = createPVCBinderPod(ctx, r.Client, pvc)
-	//if err != nil {
+
+	// err = createPVCBinderPod(ctx, r.Client, pvc)
+	// if err != nil {
 	//	logger.Error(err, "Failed to create PVCBinder pod")
 	//	return ctrl.Result{}, err
-	//}
+	// }
 
 	ephemeralName := pvc.Name + "-clone"
-	//ephemeralName := pvc.Name
+	// ephemeralName := pvc.Name
 	if !deploymentHasVolume(deployment, ephemeralName) {
 		err = mountPvcToDeployment(ctx, r.Client, deployment, ephemeralName, &pvc)
 	}
@@ -153,7 +155,7 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 func mountPvcToDeployment(ctx context.Context, c client.Client, deployment *appsv1.Deployment, name string, pvc *corev1.PersistentVolumeClaim) error {
 	storageClassName := deployment.Annotations["volume-operator.pdok.nl/storage-class-name"]
 	if storageClassName == "" {
-		storageClassName = "managed-premium-zrs"
+		storageClassName = defaultStorageClass
 	}
 	storageCapacity := deployment.Annotations["volume-operator.pdok.nl/storage-capacity"]
 
@@ -195,46 +197,9 @@ func mountPvcToDeployment(ctx context.Context, c client.Client, deployment *apps
 	return c.Patch(ctx, deployment, patch)
 }
 
-func createPVCBinderPod(ctx context.Context, client client.Client, pvc corev1.PersistentVolumeClaim) error {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "force-provision-" + pvc.Name,
-			Namespace: pvc.Namespace,
-		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name:    "busybox",
-					Image:   "busybox",
-					Command: []string{"sleep", "3600"},
-					VolumeMounts: []corev1.VolumeMount{
-						{
-							Name:      pvc.Name,
-							MountPath: "/data",
-						},
-					},
-				},
-			},
-			Volumes: []corev1.Volume{
-				{
-					Name: pvc.Name,
-					VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: pvc.Name,
-						},
-					},
-				},
-			},
-		},
-	}
-
-	err := client.Create(ctx, pod)
-	return err
-}
-
 func createPvcIfNotExists(ctx context.Context, obj client.Client, populator avp.AzureVolumePopulator, suffix string, namespace string, storageClass string, storageCapacity string) (corev1.PersistentVolumeClaim, error) {
 	if storageClass == "" {
-		storageClass = "managed-premium-zrs"
+		storageClass = defaultStorageClass
 	}
 
 	volumeName := "volume-" + suffix
@@ -340,66 +305,66 @@ func getOwningDeploymentFromReplicaSet(ctx context.Context, c client.Client, rs 
 	return deployment, nil
 }
 
-func finalizeIfNecessary(ctx context.Context, c client.Client, obj client.Object, name string, f func() error) (bool, error) {
-	if obj.GetDeletionTimestamp().IsZero() {
-		if !controllerutil.ContainsFinalizer(obj, name) {
-			//controllerutil.AddFinalizer(obj, name)
-			err := c.Update(ctx, obj)
-			return true, err
-		}
-		return true, nil
-	}
+// func finalizeIfNecessary(ctx context.Context, c client.Client, obj client.Object, name string, f func() error) (bool, error) {
+//	if obj.GetDeletionTimestamp().IsZero() {
+//		if !controllerutil.ContainsFinalizer(obj, name) {
+//			// controllerutil.AddFinalizer(obj, name)
+//			err := c.Update(ctx, obj)
+//			return true, err
+//		}
+//		return true, nil
+//	}
+//
+//	if !controllerutil.ContainsFinalizer(obj, finalizerName) {
+//		return false, nil
+//	}
+//
+//	if err := f(); err != nil {
+//		return false, err
+//	}
+//
+//	controllerutil.RemoveFinalizer(obj, finalizerName)
+//	err := c.Update(ctx, obj)
+//	return false, err
+// }
 
-	if !controllerutil.ContainsFinalizer(obj, finalizerName) {
-		return false, nil
-	}
-
-	if err := f(); err != nil {
-		return false, err
-	}
-
-	controllerutil.RemoveFinalizer(obj, finalizerName)
-	err := c.Update(ctx, obj)
-	return false, err
-}
-
-func getObjectFullName(c client.Client, obj client.Object) string {
-	groupVersionKind, err := c.GroupVersionKindFor(obj)
-	if err != nil {
-		return ""
-	}
-	key := client.ObjectKeyFromObject(obj)
-
-	return groupVersionKind.Group + "/" +
-		groupVersionKind.Version + "/" +
-		groupVersionKind.Kind + "/" +
-		key.String()
-}
-
-func (r *VolumeReconciler) deleteAllForReplicaSet(ctx context.Context, rs *appsv1.ReplicaSet, suffix string) error {
-	var objectsToDelete []client.Object
-
-	if suffix != "" {
-		populator := &avp.AzureVolumePopulator{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      rs.GetName() + suffix,
-				Namespace: rs.Namespace,
-			},
-		}
-
-		pvc := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      rs.GetName() + suffix,
-				Namespace: rs.Namespace,
-			},
-		}
-
-		objectsToDelete = append(objectsToDelete, populator, pvc)
-	}
-
-	objectsToDelete = append(objectsToDelete, rs)
-	return deleteObjects(ctx, r.Client, objectsToDelete)
-}
+// func getObjectFullName(c client.Client, obj client.Object) string {
+//	groupVersionKind, err := c.GroupVersionKindFor(obj)
+//	if err != nil {
+//		return ""
+//	}
+//	key := client.ObjectKeyFromObject(obj)
+//
+//	return groupVersionKind.Group + "/" +
+//		groupVersionKind.Version + "/" +
+//		groupVersionKind.Kind + "/" +
+//		key.String()
+// }
+//
+// func (r *VolumeReconciler) deleteAllForReplicaSet(ctx context.Context, rs *appsv1.ReplicaSet, suffix string) error {
+//	var objectsToDelete []client.Object
+//
+//	if suffix != "" {
+//		populator := &avp.AzureVolumePopulator{
+//			ObjectMeta: metav1.ObjectMeta{
+//				Name:      rs.GetName() + suffix,
+//				Namespace: rs.Namespace,
+//			},
+//		}
+//
+//		pvc := &corev1.PersistentVolumeClaim{
+//			ObjectMeta: metav1.ObjectMeta{
+//				Name:      rs.GetName() + suffix,
+//				Namespace: rs.Namespace,
+//			},
+//		}
+//
+//		objectsToDelete = append(objectsToDelete, populator, pvc)
+//	}
+//
+//	objectsToDelete = append(objectsToDelete, rs)
+//	return deleteObjects(ctx, r.Client, objectsToDelete)
+// }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *VolumeReconciler) SetupWithManager(mgr ctrl.Manager) error {

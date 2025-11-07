@@ -22,8 +22,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	. "github.com/onsi/ginkgo/v2" //nolint:revive // ginkgo bdd
-	. "github.com/onsi/gomega"    //nolint:revive // ginkgo bdd
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -54,6 +54,7 @@ func TestControllers(t *testing.T) {
 var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
+	//nolint:fatcontext
 	ctx, cancel = context.WithCancel(context.TODO())
 
 	var err error

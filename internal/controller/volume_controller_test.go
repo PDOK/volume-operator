@@ -19,8 +19,8 @@ package controller
 import (
 	"context"
 
-	. "github.com/onsi/ginkgo/v2" //nolint:revive // ginkgo bdd
-	. "github.com/onsi/gomega"    //nolint:revive // ginkgo bdd
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	avp "github.com/pdok/azure-volume-populator/api/v1alpha1"
 	v1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
