@@ -42,7 +42,6 @@ type VolumeReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-//nolint:cyclop,funlen
 func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 
@@ -207,8 +206,8 @@ func getOwningDeploymentFromReplicaSet(ctx context.Context, c client.Client, rs 
 
 func cleanUpOldReplicaSets(ctx context.Context, c client.Client, obj client.Object, deployment *appsv1.Deployment, vpc config.VolumePopulatorConfig) error {
 	var rsList appsv1.ReplicaSetList
-	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
-	err = c.List(ctx, &rsList, client.InNamespace(obj.GetNamespace()), client.MatchingLabelsSelector{
+	selector, _ := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	err := c.List(ctx, &rsList, client.InNamespace(obj.GetNamespace()), client.MatchingLabelsSelector{
 		Selector: selector,
 	})
 

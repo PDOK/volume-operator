@@ -8,14 +8,14 @@ import (
 const (
 	annotationPrefix = "volume-operator.pdok.nl"
 
-	blobPrefixAnnotation = annotationPrefix + "/blob-prefix"
-	volumePathAnnotation = annotationPrefix + "/volume-path"
-	storageCapacityAnnotation = annotationPrefix + "/storage-capacity"
+	blobPrefixAnnotation       = annotationPrefix + "/blob-prefix"
+	volumePathAnnotation       = annotationPrefix + "/volume-path"
+	storageCapacityAnnotation  = annotationPrefix + "/storage-capacity"
 	storageClassNameAnnotation = annotationPrefix + "/storage-class-name"
-	defaultStorageClass = "managed-premium-zrs"
+	defaultStorageClass        = "managed-premium-zrs"
 
-	RevisionAnnotation         = "deployment.kubernetes.io/revision"
-	ResourceSuffixAnnotation   = annotationPrefix + "/resource-suffix"
+	RevisionAnnotation       = "deployment.kubernetes.io/revision"
+	ResourceSuffixAnnotation = annotationPrefix + "/resource-suffix"
 )
 
 type VolumePopulatorConfig struct {
@@ -32,7 +32,7 @@ type VolumePopulatorConfig struct {
 
 func NewConfigFromAnnotations(d *appsv1.Deployment, rs *appsv1.ReplicaSet) VolumePopulatorConfig {
 	vpc := VolumePopulatorConfig{
-		ResourceName: d.Annotations[ResourceSuffixAnnotation],
+		ResourceName:       d.Annotations[ResourceSuffixAnnotation],
 		ResourceNamespace:  rs.GetNamespace(),
 		ReplicaSetRevision: rs.Annotations[RevisionAnnotation],
 		DeploymentRevision: d.Annotations[RevisionAnnotation],
