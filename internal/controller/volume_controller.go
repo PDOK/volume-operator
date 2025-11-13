@@ -35,6 +35,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	avp "github.com/pdok/azure-volume-populator/api/v1alpha1"
+	smoothoperator "github.com/pdok/smooth-operator/pkg/util"
 )
 
 type VolumeReconciler struct {
@@ -134,7 +135,7 @@ func createPvcIfNotExists(ctx context.Context, obj client.Client, conf config.Co
 					},
 				},
 				DataSourceRef: &corev1.TypedObjectReference{
-					APIGroup: StringPtr(avp.GroupVersion.Group),
+					APIGroup: smoothoperator.Pointer(avp.GroupVersion.Group),
 					Kind:     populator.Kind,
 					Name:     populator.Name,
 				},
@@ -245,7 +246,7 @@ func deleteAllForReplicaSet(ctx context.Context, c client.Client, rs *appsv1.Rep
 
 	objectsToDelete := []client.Object{populator, pvc, rs}
 
-	return deleteObjects(ctx, c, objectsToDelete)
+	return smoothoperator.DeleteObjects(ctx, c, objectsToDelete)
 }
 
 // SetupWithManager sets up the controller with the Manager.
