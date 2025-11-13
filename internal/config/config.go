@@ -18,7 +18,7 @@ const (
 	ResourceSuffixAnnotation = annotationPrefix + "/resource-suffix"
 )
 
-type VolumePopulatorConfig struct {
+type Config struct {
 	ResourceName        string
 	ResourceNamespace   string
 	ReplicaSetRevision  string
@@ -30,8 +30,8 @@ type VolumePopulatorConfig struct {
 	BlobDownloadOptions *avp.BlobDownloadOptions
 }
 
-func NewConfigFromAnnotations(d *appsv1.Deployment, rs *appsv1.ReplicaSet) VolumePopulatorConfig {
-	vpc := VolumePopulatorConfig{
+func NewConfigFromAnnotations(d *appsv1.Deployment, rs *appsv1.ReplicaSet) Config {
+	vpc := Config{
 		ResourceName:       d.Annotations[ResourceSuffixAnnotation],
 		ResourceNamespace:  rs.GetNamespace(),
 		ReplicaSetRevision: rs.Annotations[RevisionAnnotation],
@@ -53,10 +53,10 @@ func NewConfigFromAnnotations(d *appsv1.Deployment, rs *appsv1.ReplicaSet) Volum
 	return vpc
 }
 
-func (c VolumePopulatorConfig) RevisionsMatch() bool {
+func (c Config) RevisionsMatch() bool {
 	return c.ReplicaSetRevision != "" && c.DeploymentRevision != "" && c.ReplicaSetRevision == c.DeploymentRevision
 }
 
-func (c VolumePopulatorConfig) HasRequiredAnnotations() bool {
+func (c Config) HasRequiredAnnotations() bool {
 	return c.BlobPrefix != "" && c.VolumePath != "" && c.StorageCapacity != ""
 }

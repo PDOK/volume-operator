@@ -63,41 +63,41 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, err
 	}
 
-	vpc := config.NewConfigFromAnnotations(deployment, &rs)
-	if vpc.ResourceName == "" {
+	conf := config.NewConfigFromAnnotations(deployment, &rs)
+	if conf.ResourceName == "" {
 		logger.Info("Missing required resource suffix annotation")
 		return ctrl.Result{}, nil
 	}
 
-	err = cleanUpOldReplicaSets(ctx, r.Client, &rs, deployment, vpc)
+	err = cleanUpOldReplicaSets(ctx, r.Client, &rs, deployment, conf)
 
 	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if !vpc.RevisionsMatch() {
+	if !conf.RevisionsMatch() {
 		logger.Info(
 			"Revision mismatch, skipping reconciliation",
 			"rsRevision",
-			vpc.ReplicaSetRevision,
+			conf.ReplicaSetRevision,
 			"deploymentRevision",
-			vpc.DeploymentRevision,
+			conf.DeploymentRevision,
 		)
 		return ctrl.Result{}, nil
 	}
 
-	if !vpc.HasRequiredAnnotations() {
+	if !conf.HasRequiredAnnotations() {
 		logger.Info("Missing required volume annotations")
 		return ctrl.Result{}, nil
 	}
 
-	volumepopulator, err := createAvpIfNotExists(ctx, r.Client, vpc)
+	volumepopulator, err := createAvpIfNotExists(ctx, r.Client, conf)
 	if err != nil {
 		logger.Error(err, "Failed to create AzureVolumePopulator")
 		return ctrl.Result{}, err
 	}
 
-	err = createPvcIfNotExists(ctx, r.Client, vpc, volumepopulator)
+	err = createPvcIfNotExists(ctx, r.Client, conf, volumepopulator)
 	if err != nil {
 		logger.Error(err, "Failed to create PVC")
 		return ctrl.Result{}, err
@@ -106,31 +106,31 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return ctrl.Result{}, err
 }
 
-func createPvcIfNotExists(ctx context.Context, obj client.Client, vpc config.VolumePopulatorConfig, populator avp.AzureVolumePopulator) error {
+func createPvcIfNotExists(ctx context.Context, obj client.Client, conf config.Config, populator avp.AzureVolumePopulator) error {
 	typeMeta := metav1.TypeMeta{
 		Kind: "PersistentVolumeClaim",
 	}
 	pvc := corev1.PersistentVolumeClaim{}
 	err := obj.Get(ctx, types.NamespacedName{
-		Name:      vpc.ResourceName,
-		Namespace: vpc.ResourceNamespace,
+		Name:      conf.ResourceName,
+		Namespace: conf.ResourceNamespace,
 	}, &pvc)
 
 	if k8serrors.IsNotFound(err) {
 		pvc = corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      vpc.ResourceName,
-				Namespace: vpc.ResourceNamespace,
+				Name:      conf.ResourceName,
+				Namespace: conf.ResourceNamespace,
 			},
 			TypeMeta: typeMeta,
 			Spec: corev1.PersistentVolumeClaimSpec{
-				StorageClassName: &vpc.StorageClassName,
+				StorageClassName: &conf.StorageClassName,
 				AccessModes: []corev1.PersistentVolumeAccessMode{
 					corev1.ReadWriteOnce,
 				},
 				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: resource.MustParse(vpc.StorageCapacity),
+						corev1.ResourceStorage: resource.MustParse(conf.StorageCapacity),
 					},
 				},
 				DataSourceRef: &corev1.TypedObjectReference{
@@ -148,7 +148,7 @@ func createPvcIfNotExists(ctx context.Context, obj client.Client, vpc config.Vol
 	return err
 }
 
-func createAvpIfNotExists(ctx context.Context, obj client.Client, vpc config.VolumePopulatorConfig) (avp.AzureVolumePopulator, error) {
+func createAvpIfNotExists(ctx context.Context, obj client.Client, conf config.Config) (avp.AzureVolumePopulator, error) {
 	typeMeta := metav1.TypeMeta{
 		Kind:       "AzureVolumePopulator",
 		APIVersion: avp.GroupVersion.Group,
@@ -156,20 +156,20 @@ func createAvpIfNotExists(ctx context.Context, obj client.Client, vpc config.Vol
 
 	populator := avp.AzureVolumePopulator{}
 	err := obj.Get(ctx, types.NamespacedName{
-		Name:      vpc.ResourceName,
-		Namespace: vpc.ResourceNamespace,
+		Name:      conf.ResourceName,
+		Namespace: conf.ResourceNamespace,
 	}, &populator)
 	populator.TypeMeta = typeMeta
 
 	if k8serrors.IsNotFound(err) {
 		populator = avp.AzureVolumePopulator{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      vpc.ResourceName,
-				Namespace: vpc.ResourceNamespace,
+				Name:      conf.ResourceName,
+				Namespace: conf.ResourceNamespace,
 			},
 			Spec: avp.AzureVolumePopulatorSpec{
-				BlobPrefix:          vpc.BlobPrefix,
-				VolumePath:          vpc.VolumePath,
+				BlobPrefix:          conf.BlobPrefix,
+				VolumePath:          conf.VolumePath,
 				BlobDownloadOptions: &avp.BlobDownloadOptions{},
 			},
 		}
@@ -204,7 +204,7 @@ func getOwningDeploymentFromReplicaSet(ctx context.Context, c client.Client, rs 
 	return deployment, nil
 }
 
-func cleanUpOldReplicaSets(ctx context.Context, c client.Client, obj client.Object, deployment *appsv1.Deployment, vpc config.VolumePopulatorConfig) error {
+func cleanUpOldReplicaSets(ctx context.Context, c client.Client, obj client.Object, deployment *appsv1.Deployment, conf config.Config) error {
 	var rsList appsv1.ReplicaSetList
 	selector, _ := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
 	err := c.List(ctx, &rsList, client.InNamespace(obj.GetNamespace()), client.MatchingLabelsSelector{
@@ -217,7 +217,7 @@ func cleanUpOldReplicaSets(ctx context.Context, c client.Client, obj client.Obje
 
 	for _, rs := range rsList.Items {
 		rsRevision := rs.Annotations[config.RevisionAnnotation]
-		if rsRevision != vpc.DeploymentRevision {
+		if rsRevision != conf.DeploymentRevision {
 			if !resourceIsUsedByOtherReplicaSet(rsList, rs) {
 				return deleteAllForReplicaSet(ctx, c, &rs)
 			}
