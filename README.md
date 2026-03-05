@@ -133,7 +133,7 @@ Run `make lint` from the root of the project.
 
 ### How to Contribute
 
-See [CONTRIBUTING.md](https://github.com/pdok/.github/blob/main/CONTRIBUTING.md).
+See [CONTRIBUTING.md](https://github.com/PDOK/.github/blob/master/CONTRIBUTING.md).
 
 ### Contact
 
