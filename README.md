@@ -3,7 +3,7 @@
 _Kubernetes controller/operator to manage Azure-backed volumes for Deployments._
 
 [![Build](https://github.com/PDOK/volume-operator/actions/workflows/build-and-publish-image.yml/badge.svg)](https://github.com/PDOK/volume-operator/actions/workflows/build-and-publish-image.yml)
-[![Lint (go)](https://github.com/PDOK/volume-operator/actions/workflows/lint.yml/badge.svg)](https://github.com/PDOK/volume-operator/actions/workflows/lint.yml)
+[![Lint (go)](https://github.com/PDOK/volume-operator/actions/workflows/lint-go.yml/badge.svg)](https://github.com/PDOK/volume-operator/actions/workflows/lint-go.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/PDOK/volume-operator)](https://goreportcard.com/report/github.com/PDOK/volume-operator)
 [![GitHub license](https://img.shields.io/github/license/PDOK/volume-operator)](https://github.com/PDOK/volume-operator/blob/master/LICENSE)
 [![Docker Pulls](https://img.shields.io/docker/pulls/pdok/volume-operator.svg)](https://hub.docker.com/r/pdok/volume-operator)
@@ -133,34 +133,9 @@ Run `make lint` from the root of the project.
 
 ### How to Contribute
 
-Make a pull request...
+See [CONTRIBUTING.md](https://github.com/pdok/.github/blob/main/CONTRIBUTING.md).
 
 ### Contact
 
 Contacting the maintainers can be done through the issue tracker.
 
-## License
-
-```
-MIT License
-
-Copyright (c) 2025 Publieke Dienstverlening op de Kaart
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
