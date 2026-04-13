@@ -12,10 +12,17 @@ func resourceIsUsedByOtherReplicaSet(rsList appsv1.ReplicaSetList, currentRs app
 		}
 		currentResource := currentRs.Annotations[config.ResourceSuffixAnnotation]
 		resource := rs.Annotations[config.ResourceSuffixAnnotation]
-		if currentResource == resource {
+		if currentResource != "" && currentResource == resource && hasReplicas(rs) {
 			return true
 		}
 	}
 
 	return false
+}
+
+func hasReplicas(rs appsv1.ReplicaSet) bool {
+	if rs.Spec.Replicas == nil {
+		return false
+	}
+	return *rs.Spec.Replicas > 0
 }
