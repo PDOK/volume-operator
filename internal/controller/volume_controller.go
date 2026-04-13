@@ -223,11 +223,8 @@ func cleanUpOldReplicaSets(ctx context.Context, c client.Client, obj client.Obje
 		if rsRevision == conf.DeploymentRevision {
 			continue
 		}
-		var replicas int32
-		if rs.Spec.Replicas != nil {
-			replicas = *rs.Spec.Replicas
-		}
-		if replicas == 0 && !resourceIsUsedByOtherReplicaSet(rsList, rs) {
+
+		if !hasReplicas(rs) && !resourceIsUsedByOtherReplicaSet(rsList, rs) {
 			if err := deleteResourcesForReplicaSet(ctx, c, &rs); err != nil {
 				// don't stop loop if deletion fails, collect errors and join them later
 				errs = append(errs, err)
