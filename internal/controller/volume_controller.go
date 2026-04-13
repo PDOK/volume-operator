@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 
 	"github.com/PDOK/volume-operator/internal/config"
 	appsv1 "k8s.io/api/apps/v1"
@@ -216,19 +217,28 @@ func cleanUpOldReplicaSets(ctx context.Context, c client.Client, obj client.Obje
 		return err
 	}
 
+	var errs []error
 	for _, rs := range rsList.Items {
 		rsRevision := rs.Annotations[config.RevisionAnnotation]
-		if rsRevision != conf.DeploymentRevision {
-			if !resourceIsUsedByOtherReplicaSet(rsList, rs) {
-				return deleteAllForReplicaSet(ctx, c, &rs)
+		if rsRevision == conf.DeploymentRevision {
+			continue
+		}
+		var replicas int32
+		if rs.Spec.Replicas != nil {
+			replicas = *rs.Spec.Replicas
+		}
+		if replicas == 0 && !resourceIsUsedByOtherReplicaSet(rsList, rs) {
+			if err := deleteResourcesForReplicaSet(ctx, c, &rs); err != nil {
+				// don't stop loop if deletion fails, collect errors and join them later
+				errs = append(errs, err)
 			}
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
-func deleteAllForReplicaSet(ctx context.Context, c client.Client, rs *appsv1.ReplicaSet) error {
+func deleteResourcesForReplicaSet(ctx context.Context, c client.Client, rs *appsv1.ReplicaSet) error {
 	resourceName := rs.Annotations[config.ResourceSuffixAnnotation]
 
 	objectMeta := metav1.ObjectMeta{
@@ -244,9 +254,7 @@ func deleteAllForReplicaSet(ctx context.Context, c client.Client, rs *appsv1.Rep
 		ObjectMeta: objectMeta,
 	}
 
-	objectsToDelete := []client.Object{populator, pvc, rs}
-
-	return smoothoperator.DeleteObjects(ctx, c, objectsToDelete)
+	return smoothoperator.DeleteObjects(ctx, c, []client.Object{populator, pvc})
 }
 
 // SetupWithManager sets up the controller with the Manager.
