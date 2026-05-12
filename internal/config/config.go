@@ -11,7 +11,7 @@ const (
 	blobPrefixAnnotation       = annotationPrefix + "/blob-prefix"
 	volumePathAnnotation       = annotationPrefix + "/volume-path"
 	storageCapacityAnnotation  = annotationPrefix + "/storage-capacity"
-	storageClassNameAnnotation = annotationPrefix + "/storage-class-name"
+	storageClassNameAnnotation = annotationPrefix + "/storage-class"
 	defaultStorageClass        = "managed-premium-zrs"
 
 	RevisionAnnotation       = "deployment.kubernetes.io/revision"

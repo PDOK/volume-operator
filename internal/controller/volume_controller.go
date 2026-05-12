@@ -136,7 +136,7 @@ func createPvcIfNotExists(ctx context.Context, obj client.Client, conf config.Co
 					},
 				},
 				DataSourceRef: &corev1.TypedObjectReference{
-					APIGroup: smoothoperator.Pointer(avp.GroupVersion.Group),
+					APIGroup: new(avp.GroupVersion.Group),
 					Kind:     populator.Kind,
 					Name:     populator.Name,
 				},
