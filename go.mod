@@ -1,6 +1,6 @@
 module github.com/PDOK/volume-operator
 
-go 1.25.1
+go 1.26.3
 
 require (
 	github.com/onsi/ginkgo/v2 v2.22.1
