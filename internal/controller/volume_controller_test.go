@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"maps"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -36,18 +37,13 @@ import (
 
 const (
 	testNamespace = "default"
-
-	// Not exported by the config package, mirrored here from the documented
-	// volume-operator.pdok.nl annotations (see CLAUDE.md).
 	blobPrefixAnnotation = "volume-operator.pdok.nl/blob-prefix"
 	volumePathAnnotation = "volume-operator.pdok.nl/volume-path"
 )
 
 func newDeployment(name, revision string, annotations map[string]string) *appsv1.Deployment {
 	allAnnotations := map[string]string{config.RevisionAnnotation: revision}
-	for k, v := range annotations {
-		allAnnotations[k] = v
-	}
+	maps.Copy(allAnnotations, annotations)
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
@@ -71,9 +67,7 @@ func newReplicaSet(name string, owner *appsv1.Deployment, revision string, repli
 	labels := map[string]string{}
 	var ownerRefs []metav1.OwnerReference
 	if owner != nil {
-		for k, v := range owner.Spec.Selector.MatchLabels {
-			labels[k] = v
-		}
+		maps.Copy(labels, owner.Spec.Selector.MatchLabels)
 		ownerRefs = []metav1.OwnerReference{
 			{
 				APIVersion: "apps/v1",
