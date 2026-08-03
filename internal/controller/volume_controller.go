@@ -217,6 +217,10 @@ func cleanUpOldReplicaSets(ctx context.Context, c client.Client, obj client.Obje
 		return err
 	}
 
+	if !currentReplicaSetIsAvailable(rsList, conf.DeploymentRevision) {
+		return nil
+	}
+
 	var errs []error
 	for _, rs := range rsList.Items {
 		rsRevision := rs.Annotations[config.RevisionAnnotation]
