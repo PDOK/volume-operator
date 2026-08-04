@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	testNamespace = "default"
+	testNamespace        = "default"
 	blobPrefixAnnotation = "volume-operator.pdok.nl/blob-prefix"
 	volumePathAnnotation = "volume-operator.pdok.nl/volume-path"
 )
