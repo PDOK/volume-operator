@@ -26,3 +26,15 @@ func hasReplicas(rs appsv1.ReplicaSet) bool {
 	}
 	return *rs.Spec.Replicas > 0
 }
+
+func currentReplicaSetIsAvailable(rsList appsv1.ReplicaSetList, deploymentRevision string) bool {
+	if deploymentRevision == "" {
+		return false
+	}
+	for _, rs := range rsList.Items {
+		if rs.Annotations[config.RevisionAnnotation] == deploymentRevision {
+			return rs.Status.AvailableReplicas > 0
+		}
+	}
+	return false
+}
