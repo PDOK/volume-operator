@@ -71,12 +71,6 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-	err = cleanUpOldReplicaSets(ctx, r.Client, &rs, deployment, conf)
-
-	if err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-
 	if !conf.RevisionsMatch() {
 		logger.Info(
 			"Revision mismatch, skipping reconciliation",
@@ -103,6 +97,11 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err != nil {
 		logger.Error(err, "Failed to create PVC")
 		return ctrl.Result{}, err
+	}
+
+	err = cleanUpOldReplicaSets(ctx, r.Client, &rs, deployment, conf)
+	if err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	return ctrl.Result{}, err
