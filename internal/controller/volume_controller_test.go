@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"maps"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -27,12 +28,15 @@ import (
 	avp "github.com/pdok/azure-volume-populator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -108,14 +112,10 @@ func newAVP(name string) *avp.AzureVolumePopulator {
 	}
 }
 
-func newPVC(name string, phase corev1.PersistentVolumeClaimPhase) *corev1.PersistentVolumeClaim {
-	pvc := &corev1.PersistentVolumeClaim{
+func newPVC(name string) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
 	}
-	if phase != "" {
-		pvc.Status.Phase = phase
-	}
-	return pvc
 }
 
 var _ = Describe("Volume Controller", func() {
@@ -461,6 +461,187 @@ var _ = Describe("Volume Controller", func() {
 		})
 	})
 
+	Context("owner references", func() {
+		It("sets an owner reference on the AVP and PVC pointing at the creating ReplicaSet", func() {
+			deployment := newDeployment("dep-owner-ref", "1", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-owner-ref",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			rs := newReplicaSet("rs-owner-ref", deployment, "1", 1, 1, "suffix-owner-ref")
+			Expect(k8sClient.Create(ctx, rs)).To(Succeed())
+
+			_, err := reconcileRS(rs.Name)
+			Expect(err).NotTo(HaveOccurred())
+
+			createdAvp := &avp.AzureVolumePopulator{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-owner-ref", Namespace: testNamespace}, createdAvp)).To(Succeed())
+			Expect(createdAvp.OwnerReferences).To(ConsistOf(HaveField("UID", rs.UID)))
+
+			createdPvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-owner-ref", Namespace: testNamespace}, createdPvc)).To(Succeed())
+			Expect(createdPvc.OwnerReferences).To(ConsistOf(HaveField("UID", rs.UID)))
+		})
+
+		It("adds a new ReplicaSet as an additional owner of a reused AVP/PVC, without dropping the previous owner", func() {
+			deployment := newDeployment("dep-shared-owner", "1", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-shared-owner",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			oldRs := newReplicaSet("rs-shared-owner-old", deployment, "1", 1, 1, "suffix-shared-owner")
+			Expect(k8sClient.Create(ctx, oldRs)).To(Succeed())
+
+			_, err := reconcileRS(oldRs.Name)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: deployment.Name, Namespace: testNamespace}, deployment)).To(Succeed())
+			deployment.Annotations[config.RevisionAnnotation] = "2"
+			Expect(k8sClient.Update(ctx, deployment)).To(Succeed())
+
+			newRs := newReplicaSet("rs-shared-owner-new", deployment, "2", 1, 1, "suffix-shared-owner")
+			Expect(k8sClient.Create(ctx, newRs)).To(Succeed())
+
+			_, err = reconcileRS(newRs.Name)
+			Expect(err).NotTo(HaveOccurred())
+
+			createdAvp := &avp.AzureVolumePopulator{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-shared-owner", Namespace: testNamespace}, createdAvp)).To(Succeed())
+			Expect(createdAvp.OwnerReferences).To(ConsistOf(HaveField("UID", oldRs.UID), HaveField("UID", newRs.UID)))
+
+			createdPvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-shared-owner", Namespace: testNamespace}, createdPvc)).To(Succeed())
+			Expect(createdPvc.OwnerReferences).To(ConsistOf(HaveField("UID", oldRs.UID), HaveField("UID", newRs.UID)))
+		})
+
+		It("retries when adding an owner reference hits a conflict instead of surfacing an error", func() {
+			scheme := k8sClient.Scheme()
+			conflicts := map[string]int{}
+			conflictingClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						kind := fmt.Sprintf("%T", obj)
+						if conflicts[kind] == 0 {
+							conflicts[kind]++
+							return k8serrors.NewConflict(schema.GroupResource{}, obj.GetName(), nil)
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				}).
+				Build()
+
+			deployment := newDeployment("dep-conflict", "1", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-conflict",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(conflictingClient.Create(ctx, deployment)).To(Succeed())
+
+			rs := newReplicaSet("rs-conflict", deployment, "1", 1, 1, "suffix-conflict")
+			Expect(conflictingClient.Create(ctx, rs)).To(Succeed())
+
+			Expect(conflictingClient.Create(ctx, newAVP("suffix-conflict"))).To(Succeed())
+			Expect(conflictingClient.Create(ctx, newPVC("suffix-conflict"))).To(Succeed())
+
+			conflictingReconciler := &VolumeReconciler{Client: conflictingClient, Scheme: scheme}
+			_, err := conflictingReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: rs.Name, Namespace: testNamespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(conflicts).To(HaveLen(2), "expected one conflict each for the AVP and the PVC")
+
+			createdAvp := &avp.AzureVolumePopulator{}
+			Expect(conflictingClient.Get(ctx, types.NamespacedName{Name: "suffix-conflict", Namespace: testNamespace}, createdAvp)).To(Succeed())
+			Expect(createdAvp.OwnerReferences).To(ConsistOf(HaveField("UID", rs.UID)))
+
+			createdPvc := &corev1.PersistentVolumeClaim{}
+			Expect(conflictingClient.Get(ctx, types.NamespacedName{Name: "suffix-conflict", Namespace: testNamespace}, createdPvc)).To(Succeed())
+			Expect(createdPvc.OwnerReferences).To(ConsistOf(HaveField("UID", rs.UID)))
+		})
+
+		It("does not patch a reused AVP/PVC that is already owned by the ReplicaSet", func() {
+			scheme := k8sClient.Scheme()
+			patches := 0
+			countingClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						patches++
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				}).
+				Build()
+
+			deployment := newDeployment("dep-idempotent", "1", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-idempotent",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(countingClient.Create(ctx, deployment)).To(Succeed())
+
+			rs := newReplicaSet("rs-idempotent", deployment, "1", 1, 1, "suffix-idempotent")
+			Expect(countingClient.Create(ctx, rs)).To(Succeed())
+
+			countingReconciler := &VolumeReconciler{Client: countingClient, Scheme: scheme}
+			for range 3 {
+				_, err := countingReconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: rs.Name, Namespace: testNamespace},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(patches).To(BeZero())
+		})
+
+		It("treats AlreadyExists on create as success instead of surfacing an error", func() {
+			scheme := k8sClient.Scheme()
+			racyClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						switch obj.(type) {
+						case *avp.AzureVolumePopulator, *corev1.PersistentVolumeClaim:
+							return k8serrors.NewNotFound(schema.GroupResource{}, key.Name)
+						default:
+							return c.Get(ctx, key, obj, opts...)
+						}
+					},
+				}).
+				Build()
+
+			deployment := newDeployment("dep-create-race", "1", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-create-race",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(racyClient.Create(ctx, deployment)).To(Succeed())
+
+			rs := newReplicaSet("rs-create-race", deployment, "1", 1, 1, "suffix-create-race")
+			Expect(racyClient.Create(ctx, rs)).To(Succeed())
+
+			Expect(racyClient.Create(ctx, newAVP("suffix-create-race"))).To(Succeed())
+			Expect(racyClient.Create(ctx, newPVC("suffix-create-race"))).To(Succeed())
+
+			racyReconciler := &VolumeReconciler{Client: racyClient, Scheme: scheme}
+			_, err := racyReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: rs.Name, Namespace: testNamespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			avpList := &avp.AzureVolumePopulatorList{}
+			Expect(racyClient.List(ctx, avpList, client.InNamespace(testNamespace))).To(Succeed())
+			Expect(avpList.Items).To(HaveLen(1))
+
+			pvcList := &corev1.PersistentVolumeClaimList{}
+			Expect(racyClient.List(ctx, pvcList, client.InNamespace(testNamespace))).To(Succeed())
+			Expect(pvcList.Items).To(HaveLen(1))
+		})
+	})
+
 	Context("updating resources", func() {
 		It("does not mutate an existing AVP when the Deployment's blob-prefix changes", func() {
 			deployment := newDeployment("dep-update-avp", "1", map[string]string{
@@ -536,7 +717,7 @@ var _ = Describe("Volume Controller", func() {
 			Expect(k8sClient.Create(ctx, newRs)).To(Succeed())
 
 			Expect(k8sClient.Create(ctx, newAVP("suffix-rollout-old"))).To(Succeed())
-			Expect(k8sClient.Create(ctx, newPVC("suffix-rollout-old", ""))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newPVC("suffix-rollout-old"))).To(Succeed())
 
 			_, err := reconcileRS(newRs.Name)
 			Expect(err).NotTo(HaveOccurred())
@@ -568,38 +749,13 @@ var _ = Describe("Volume Controller", func() {
 			Expect(k8sClient.Create(ctx, currentRs)).To(Succeed())
 
 			Expect(k8sClient.Create(ctx, newAVP("suffix-shared"))).To(Succeed())
-			Expect(k8sClient.Create(ctx, newPVC("suffix-shared", ""))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newPVC("suffix-shared"))).To(Succeed())
 
 			_, err := reconcileRS(currentRs.Name)
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-shared", Namespace: testNamespace}, &avp.AzureVolumePopulator{})).To(Succeed())
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-shared", Namespace: testNamespace}, &corev1.PersistentVolumeClaim{})).To(Succeed())
-		})
-
-		It("keeps old resources while the current PVC is still being populated", func() {
-			deployment := newDeployment("dep-populating", "2", map[string]string{
-				config.ResourceSuffixAnnotation: "suffix-populating-new",
-				blobPrefixAnnotation:            "blob/prefix",
-				volumePathAnnotation:            "/data",
-			})
-			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
-
-			oldRs := newReplicaSet("rs-populating-old", deployment, "1", 0, 0, "suffix-populating-old")
-			Expect(k8sClient.Create(ctx, oldRs)).To(Succeed())
-			newRs := newReplicaSet("rs-populating-new", deployment, "2", 1, 1, "suffix-populating-new")
-			Expect(k8sClient.Create(ctx, newRs)).To(Succeed())
-
-			Expect(k8sClient.Create(ctx, newAVP("suffix-populating-old"))).To(Succeed())
-			Expect(k8sClient.Create(ctx, newPVC("suffix-populating-old", ""))).To(Succeed())
-			// The current PVC already exists and is still pending (being populated).
-			Expect(k8sClient.Create(ctx, newPVC("suffix-populating-new", corev1.ClaimPending))).To(Succeed())
-
-			_, err := reconcileRS(newRs.Name)
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-populating-old", Namespace: testNamespace}, &avp.AzureVolumePopulator{})).To(Succeed())
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-populating-old", Namespace: testNamespace}, &corev1.PersistentVolumeClaim{})).To(Succeed())
 		})
 
 		It("keeps an old ReplicaSet's resources while it still has replicas", func() {
@@ -616,7 +772,7 @@ var _ = Describe("Volume Controller", func() {
 			Expect(k8sClient.Create(ctx, newRs)).To(Succeed())
 
 			Expect(k8sClient.Create(ctx, newAVP("suffix-oldscaled-old"))).To(Succeed())
-			Expect(k8sClient.Create(ctx, newPVC("suffix-oldscaled-old", ""))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newPVC("suffix-oldscaled-old"))).To(Succeed())
 
 			_, err := reconcileRS(newRs.Name)
 			Expect(err).NotTo(HaveOccurred())
@@ -642,7 +798,7 @@ var _ = Describe("Volume Controller", func() {
 
 			for _, name := range []string{"suffix-multi-old1", "suffix-multi-old2"} {
 				Expect(k8sClient.Create(ctx, newAVP(name))).To(Succeed())
-				Expect(k8sClient.Create(ctx, newPVC(name, ""))).To(Succeed())
+				Expect(k8sClient.Create(ctx, newPVC(name))).To(Succeed())
 			}
 
 			_, err := reconcileRS(newRs.Name)
@@ -694,6 +850,249 @@ var _ = Describe("Volume Controller", func() {
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-samehash", Namespace: testNamespace}, &avp.AzureVolumePopulator{})).To(Succeed())
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-samehash", Namespace: testNamespace}, &corev1.PersistentVolumeClaim{})).To(Succeed())
+		})
+
+		It("keeps the current hash's resources when the current ReplicaSet is scaled to 0 but still reports available pods", func() {
+			deployment := newDeployment("dep-scaledown", "2", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-scaledown",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			oldRs := newReplicaSet("rs-scaledown-old", deployment, "1", 0, 0, "suffix-scaledown")
+			Expect(k8sClient.Create(ctx, oldRs)).To(Succeed())
+			// desired 0, but status still lags: the pods are terminating
+			currentRs := newReplicaSet("rs-scaledown-current", deployment, "2", 0, 1, "suffix-scaledown")
+			Expect(k8sClient.Create(ctx, currentRs)).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, newAVP("suffix-scaledown"))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newPVC("suffix-scaledown"))).To(Succeed())
+
+			for _, name := range []string{oldRs.Name, currentRs.Name} {
+				_, err := reconcileRS(name)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-scaledown", Namespace: testNamespace}, &avp.AzureVolumePopulator{})).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-scaledown", Namespace: testNamespace}, &corev1.PersistentVolumeClaim{})).To(Succeed())
+		})
+
+		It("does not requeue for the current hash's resources while the Deployment is scaled to 0", func() {
+			deployment := newDeployment("dep-scaledown-requeue", "2", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-scaledown-requeue",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			oldRs := newReplicaSet("rs-scaledown-requeue-old", deployment, "1", 0, 0, "suffix-scaledown-requeue")
+			Expect(k8sClient.Create(ctx, oldRs)).To(Succeed())
+			currentRs := newReplicaSet("rs-scaledown-requeue-current", deployment, "2", 0, 0, "suffix-scaledown-requeue")
+			Expect(k8sClient.Create(ctx, currentRs)).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, newAVP("suffix-scaledown-requeue"))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newPVC("suffix-scaledown-requeue"))).To(Succeed())
+
+			result, err := reconcileRS(oldRs.Name)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeZero())
+		})
+	})
+
+	Context("cleanup is driven by every ReplicaSet in the set", func() {
+		It("cleans up a superseded ReplicaSet's resources when that ReplicaSet is the one reconciled", func() {
+			deployment := newDeployment("dep-trigger-old", "2", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-trigger-new",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			oldRs := newReplicaSet("rs-trigger-old", deployment, "1", 0, 0, "suffix-trigger-old")
+			Expect(k8sClient.Create(ctx, oldRs)).To(Succeed())
+			currentRs := newReplicaSet("rs-trigger-new", deployment, "2", 1, 1, "suffix-trigger-new")
+			Expect(k8sClient.Create(ctx, currentRs)).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, newAVP("suffix-trigger-old"))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newPVC("suffix-trigger-old"))).To(Succeed())
+
+			_, err := reconcileRS(oldRs.Name)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-trigger-old", Namespace: testNamespace}, &avp.AzureVolumePopulator{})
+			Expect(err).To(HaveOccurred())
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-trigger-old", Namespace: testNamespace}, &corev1.PersistentVolumeClaim{})
+			Expect(err).To(HaveOccurred())
+		})
+
+		// test bgt specific case of quick updates
+		It("cleans up the oldest resources when a superseded ReplicaSet that shares the current suffix is reconciled", func() {
+			deployment := newDeployment("dep-trigger-shared", "3", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-shared-b",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			rs1 := newReplicaSet("rs-shared-1", deployment, "1", 0, 0, "suffix-shared-a")
+			Expect(k8sClient.Create(ctx, rs1)).To(Succeed())
+			rs2 := newReplicaSet("rs-shared-2", deployment, "2", 0, 0, "suffix-shared-b")
+			Expect(k8sClient.Create(ctx, rs2)).To(Succeed())
+			rs3 := newReplicaSet("rs-shared-3", deployment, "3", 1, 1, "suffix-shared-b")
+			Expect(k8sClient.Create(ctx, rs3)).To(Succeed())
+
+			for _, name := range []string{"suffix-shared-a", "suffix-shared-b"} {
+				Expect(k8sClient.Create(ctx, newAVP(name))).To(Succeed())
+				Expect(k8sClient.Create(ctx, newPVC(name))).To(Succeed())
+			}
+
+			_, err := reconcileRS(rs2.Name)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-shared-a", Namespace: testNamespace}, &corev1.PersistentVolumeClaim{})
+			Expect(err).To(HaveOccurred())
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-shared-a", Namespace: testNamespace}, &avp.AzureVolumePopulator{})
+			Expect(err).To(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-shared-b", Namespace: testNamespace}, &corev1.PersistentVolumeClaim{})).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-shared-b", Namespace: testNamespace}, &avp.AzureVolumePopulator{})).To(Succeed())
+		})
+
+		// test bgt specific case of quick updates, latest rs not being available when new ones are preparing
+		It("does not provision resources for a superseded revision when its ReplicaSet is reconciled", func() {
+			deployment := newDeployment("dep-trigger-nocreate", "2", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-nocreate-new",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			oldRs := newReplicaSet("rs-nocreate-old", deployment, "1", 0, 0, "suffix-nocreate-old")
+			Expect(k8sClient.Create(ctx, oldRs)).To(Succeed())
+			currentRs := newReplicaSet("rs-nocreate-new", deployment, "2", 1, 1, "suffix-nocreate-new")
+			Expect(k8sClient.Create(ctx, currentRs)).To(Succeed())
+
+			_, err := reconcileRS(oldRs.Name)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-nocreate-new", Namespace: testNamespace}, &avp.AzureVolumePopulator{})
+			Expect(err).To(HaveOccurred())
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-nocreate-new", Namespace: testNamespace}, &corev1.PersistentVolumeClaim{})
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("respects the availability gate when cleanup is triggered by an old ReplicaSet", func() {
+			deployment := newDeployment("dep-trigger-gate", "2", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-gate-new",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			oldRs := newReplicaSet("rs-gate-old", deployment, "1", 0, 0, "suffix-gate-old")
+			Expect(k8sClient.Create(ctx, oldRs)).To(Succeed())
+			// current revision exists but is not serving yet.
+			currentRs := newReplicaSet("rs-gate-new", deployment, "2", 1, 0, "suffix-gate-new")
+			Expect(k8sClient.Create(ctx, currentRs)).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, newAVP("suffix-gate-old"))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newPVC("suffix-gate-old"))).To(Succeed())
+
+			_, err := reconcileRS(oldRs.Name)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-gate-old", Namespace: testNamespace}, &avp.AzureVolumePopulator{})).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-gate-old", Namespace: testNamespace}, &corev1.PersistentVolumeClaim{})).To(Succeed())
+		})
+
+		It("still cleans up superseded resources when the Deployment is missing volume annotations", func() {
+			deployment := newDeployment("dep-trigger-noann", "2", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-noann-new",
+				// blob-prefix / volume-path deliberately omitted
+			})
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			oldRs := newReplicaSet("rs-noann-old", deployment, "1", 0, 0, "suffix-noann-old")
+			Expect(k8sClient.Create(ctx, oldRs)).To(Succeed())
+			currentRs := newReplicaSet("rs-noann-new", deployment, "2", 1, 1, "suffix-noann-new")
+			Expect(k8sClient.Create(ctx, currentRs)).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, newAVP("suffix-noann-old"))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newPVC("suffix-noann-old"))).To(Succeed())
+
+			_, err := reconcileRS(oldRs.Name)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-noann-old", Namespace: testNamespace}, &corev1.PersistentVolumeClaim{})
+			Expect(err).To(HaveOccurred())
+		})
+	})
+
+	// Fix 2: while the availability gate holds cleanup back, the reconcile must ask to
+	// be requeued so it converges without depending on an incidental later event.
+	Context("requeueing while cleanup is blocked", func() {
+		It("requeues when the current ReplicaSet is not yet available and old resources remain", func() {
+			deployment := newDeployment("dep-requeue", "2", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-requeue-new",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			oldRs := newReplicaSet("rs-requeue-old", deployment, "1", 0, 0, "suffix-requeue-old")
+			Expect(k8sClient.Create(ctx, oldRs)).To(Succeed())
+			currentRs := newReplicaSet("rs-requeue-new", deployment, "2", 1, 0, "suffix-requeue-new")
+			Expect(k8sClient.Create(ctx, currentRs)).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, newAVP("suffix-requeue-old"))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newPVC("suffix-requeue-old"))).To(Succeed())
+
+			result, err := reconcileRS(currentRs.Name)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+		})
+
+		It("does not requeue once the old resources have been cleaned up", func() {
+			deployment := newDeployment("dep-requeue-settled", "2", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-settled-new",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			oldRs := newReplicaSet("rs-settled-old", deployment, "1", 0, 0, "suffix-settled-old")
+			Expect(k8sClient.Create(ctx, oldRs)).To(Succeed())
+			currentRs := newReplicaSet("rs-settled-new", deployment, "2", 1, 1, "suffix-settled-new")
+			Expect(k8sClient.Create(ctx, currentRs)).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, newAVP("suffix-settled-old"))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newPVC("suffix-settled-old"))).To(Succeed())
+
+			result, err := reconcileRS(currentRs.Name)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(reconcile.Result{}))
+
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: "suffix-settled-old", Namespace: testNamespace}, &avp.AzureVolumePopulator{})
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("does not requeue when the current ReplicaSet is unavailable but there is nothing to clean up", func() {
+			deployment := newDeployment("dep-requeue-idle", "2", map[string]string{
+				config.ResourceSuffixAnnotation: "suffix-idle-new",
+				blobPrefixAnnotation:            "blob/prefix",
+				volumePathAnnotation:            "/data",
+			})
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			oldRs := newReplicaSet("rs-idle-old", deployment, "1", 0, 0, "suffix-idle-old")
+			Expect(k8sClient.Create(ctx, oldRs)).To(Succeed())
+			currentRs := newReplicaSet("rs-idle-new", deployment, "2", 1, 0, "suffix-idle-new")
+			Expect(k8sClient.Create(ctx, currentRs)).To(Succeed())
+
+			result, err := reconcileRS(currentRs.Name)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(reconcile.Result{}))
 		})
 	})
 })

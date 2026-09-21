@@ -17,18 +17,12 @@ limitations under the License.
 package controller
 
 import (
-	"context"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/PDOK/volume-operator/internal/config"
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func helperReplicaSet(name, revision, suffix string, replicas *int32, available int32) appsv1.ReplicaSet {
@@ -123,34 +117,6 @@ var _ = Describe("Controller helpers", func() {
 				helperReplicaSet("other", "2", "shared", int32Ptr(1), 1),
 			}}
 			Expect(resourceIsUsedByOtherReplicaSet(list, current)).To(BeTrue())
-		})
-	})
-
-	Describe("pvcIsBeingPopulated", func() {
-		var (
-			k8sClient client.Client
-			conf      config.Config
-		)
-
-		BeforeEach(func() {
-			scheme := runtime.NewScheme()
-			Expect(corev1.AddToScheme(scheme)).To(Succeed())
-			k8sClient = fake.NewClientBuilder().WithScheme(scheme).Build()
-			conf = config.Config{ResourceName: "pvc", ResourceNamespace: testNamespace}
-		})
-
-		It("is false when the PVC does not exist", func() {
-			Expect(pvcIsBeingPopulated(context.Background(), k8sClient, conf)).To(BeFalse())
-		})
-
-		It("is true when the PVC is pending", func() {
-			Expect(k8sClient.Create(context.Background(), newPVC("pvc", corev1.ClaimPending))).To(Succeed())
-			Expect(pvcIsBeingPopulated(context.Background(), k8sClient, conf)).To(BeTrue())
-		})
-
-		It("is false when the PVC is bound", func() {
-			Expect(k8sClient.Create(context.Background(), newPVC("pvc", corev1.ClaimBound))).To(Succeed())
-			Expect(pvcIsBeingPopulated(context.Background(), k8sClient, conf)).To(BeFalse())
 		})
 	})
 })
