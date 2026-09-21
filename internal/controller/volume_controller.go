@@ -1,24 +1,11 @@
-/*
-Copyright 2025.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package controller
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
+	"time"
 
 	"github.com/PDOK/volume-operator/internal/config"
 	appsv1 "k8s.io/api/apps/v1"
@@ -27,8 +14,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -38,6 +27,8 @@ import (
 	avp "github.com/pdok/azure-volume-populator/api/v1alpha1"
 	smoothoperator "github.com/pdok/smooth-operator/pkg/util"
 )
+
+const cleanupRetryInterval = time.Minute
 
 type VolumeReconciler struct {
 	client.Client
@@ -71,116 +62,164 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-	if !conf.RevisionsMatch() {
+	if conf.RevisionsMatch() {
+		if !conf.HasRequiredAnnotations() {
+			logger.Info("Missing required volume annotations")
+			return ctrl.Result{}, nil
+		}
+
+		volumepopulator, err := createAvpIfNotExists(ctx, r.Client, r.Scheme, conf, &rs)
+		if err != nil {
+			logger.Error(err, "Failed to create AzureVolumePopulator")
+			return ctrl.Result{}, err
+		}
+
+		if err = createPvcIfNotExists(ctx, r.Client, r.Scheme, conf, volumepopulator, &rs); err != nil {
+			logger.Error(err, "Failed to create PVC")
+			return ctrl.Result{}, err
+		}
+	} else {
 		logger.Info(
-			"Revision mismatch, skipping reconciliation",
+			"Revision mismatch, skipping resource creation",
 			"rsRevision",
 			conf.ReplicaSetRevision,
 			"deploymentRevision",
 			conf.DeploymentRevision,
 		)
-		return ctrl.Result{}, nil
 	}
 
-	if !conf.HasRequiredAnnotations() {
-		logger.Info("Missing required volume annotations")
-		return ctrl.Result{}, nil
-	}
-
-	volumepopulator, err := createAvpIfNotExists(ctx, r.Client, conf)
-	if err != nil {
-		logger.Error(err, "Failed to create AzureVolumePopulator")
-		return ctrl.Result{}, err
-	}
-
-	err = createPvcIfNotExists(ctx, r.Client, conf, volumepopulator)
-	if err != nil {
-		logger.Error(err, "Failed to create PVC")
-		return ctrl.Result{}, err
-	}
-
-	err = cleanUpOldReplicaSets(ctx, r.Client, &rs, deployment, conf)
+	requeue, err := cleanUpOldReplicaSets(ctx, r.Client, &rs, deployment, conf)
 	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	if requeue {
+		return ctrl.Result{RequeueAfter: cleanupRetryInterval}, nil
+	}
 
-	return ctrl.Result{}, err
+	return ctrl.Result{}, nil
 }
 
-func createPvcIfNotExists(ctx context.Context, obj client.Client, conf config.Config, populator avp.AzureVolumePopulator) error {
+func createPvcIfNotExists(ctx context.Context, c client.Client, scheme *runtime.Scheme, conf config.Config, populator avp.AzureVolumePopulator, rs *appsv1.ReplicaSet) error {
 	typeMeta := metav1.TypeMeta{
 		Kind: "PersistentVolumeClaim",
 	}
 	pvc := corev1.PersistentVolumeClaim{}
-	err := obj.Get(ctx, types.NamespacedName{
+	err := c.Get(ctx, types.NamespacedName{
 		Name:      conf.ResourceName,
 		Namespace: conf.ResourceNamespace,
 	}, &pvc)
 
-	if k8serrors.IsNotFound(err) {
-		pvc = corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      conf.ResourceName,
-				Namespace: conf.ResourceNamespace,
-			},
-			TypeMeta: typeMeta,
-			Spec: corev1.PersistentVolumeClaimSpec{
-				StorageClassName: &conf.StorageClassName,
-				AccessModes: []corev1.PersistentVolumeAccessMode{
-					corev1.ReadWriteOnce,
-				},
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: resource.MustParse(conf.StorageCapacity),
-					},
-				},
-				DataSourceRef: &corev1.TypedObjectReference{
-					APIGroup: new(avp.GroupVersion.Group),
-					Kind:     populator.Kind,
-					Name:     populator.Name,
-				},
-			},
-		}
-
-		err = obj.Create(ctx, &pvc)
-		pvc.TypeMeta = typeMeta
+	if err == nil {
+		return ensureOwnerReference(ctx, c, &pvc, rs, scheme)
+	}
+	if !k8serrors.IsNotFound(err) {
+		return err
 	}
 
-	return err
+	pvc = corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      conf.ResourceName,
+			Namespace: conf.ResourceNamespace,
+		},
+		TypeMeta: typeMeta,
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &conf.StorageClassName,
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.ReadWriteOnce,
+			},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse(conf.StorageCapacity),
+				},
+			},
+			DataSourceRef: &corev1.TypedObjectReference{
+				APIGroup: new(avp.GroupVersion.Group),
+				Kind:     populator.Kind,
+				Name:     populator.Name,
+			},
+		},
+	}
+
+	if err := controllerutil.SetOwnerReference(rs, &pvc, scheme); err != nil {
+		return err
+	}
+
+	if err := c.Create(ctx, &pvc); err != nil && !k8serrors.IsAlreadyExists(err) {
+		return err
+	}
+
+	return nil
 }
 
-func createAvpIfNotExists(ctx context.Context, obj client.Client, conf config.Config) (avp.AzureVolumePopulator, error) {
+func createAvpIfNotExists(ctx context.Context, c client.Client, scheme *runtime.Scheme, conf config.Config, rs *appsv1.ReplicaSet) (avp.AzureVolumePopulator, error) {
 	typeMeta := metav1.TypeMeta{
 		Kind:       "AzureVolumePopulator",
 		APIVersion: avp.GroupVersion.Group,
 	}
 
 	populator := avp.AzureVolumePopulator{}
-	err := obj.Get(ctx, types.NamespacedName{
+	err := c.Get(ctx, types.NamespacedName{
 		Name:      conf.ResourceName,
 		Namespace: conf.ResourceNamespace,
 	}, &populator)
 	populator.TypeMeta = typeMeta
 
-	if k8serrors.IsNotFound(err) {
-		populator = avp.AzureVolumePopulator{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      conf.ResourceName,
-				Namespace: conf.ResourceNamespace,
-			},
-			Spec: avp.AzureVolumePopulatorSpec{
-				BlobPrefix:          conf.BlobPrefix,
-				VolumePath:          conf.VolumePath,
-				BlobDownloadOptions: &avp.BlobDownloadOptions{},
-			},
-		}
-
-		err = obj.Create(ctx, &populator)
+	if err == nil {
+		err = ensureOwnerReference(ctx, c, &populator, rs, scheme)
 		populator.TypeMeta = typeMeta
 		return populator, err
 	}
+	if !k8serrors.IsNotFound(err) {
+		return populator, err
+	}
 
-	return populator, err
+	populator = avp.AzureVolumePopulator{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      conf.ResourceName,
+			Namespace: conf.ResourceNamespace,
+		},
+		Spec: avp.AzureVolumePopulatorSpec{
+			BlobPrefix:          conf.BlobPrefix,
+			VolumePath:          conf.VolumePath,
+			BlobDownloadOptions: &avp.BlobDownloadOptions{},
+		},
+	}
+
+	if err := controllerutil.SetOwnerReference(rs, &populator, scheme); err != nil {
+		return populator, err
+	}
+
+	if err := c.Create(ctx, &populator); err != nil && !k8serrors.IsAlreadyExists(err) {
+		return populator, err
+	}
+	populator.TypeMeta = typeMeta
+
+	return populator, nil
+}
+
+func ensureOwnerReference(ctx context.Context, c client.Client, obj client.Object, rs *appsv1.ReplicaSet, scheme *runtime.Scheme) error {
+	key := client.ObjectKeyFromObject(obj)
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := c.Get(ctx, key, obj); err != nil {
+			return err
+		}
+
+		orig, ok := obj.DeepCopyObject().(client.Object)
+		if !ok {
+			return fmt.Errorf("unable to copy %T", obj)
+		}
+
+		if err := controllerutil.SetOwnerReference(rs, obj, scheme); err != nil {
+			return err
+		}
+
+		if slices.Equal(orig.GetOwnerReferences(), obj.GetOwnerReferences()) {
+			return nil
+		}
+
+		return c.Patch(ctx, obj, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))
+	})
 }
 
 func getOwningDeploymentFromReplicaSet(ctx context.Context, c client.Client, rs appsv1.ReplicaSet) (*appsv1.Deployment, error) {
@@ -205,37 +244,68 @@ func getOwningDeploymentFromReplicaSet(ctx context.Context, c client.Client, rs 
 	return deployment, nil
 }
 
-func cleanUpOldReplicaSets(ctx context.Context, c client.Client, obj client.Object, deployment *appsv1.Deployment, conf config.Config) error {
+func cleanUpOldReplicaSets(ctx context.Context, c client.Client, obj client.Object, deployment *appsv1.Deployment, conf config.Config) (requeue bool, err error) {
 	var rsList appsv1.ReplicaSetList
 	selector, _ := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
-	err := c.List(ctx, &rsList, client.InNamespace(obj.GetNamespace()), client.MatchingLabelsSelector{
+	if err = c.List(ctx, &rsList, client.InNamespace(obj.GetNamespace()), client.MatchingLabelsSelector{
 		Selector: selector,
-	})
-
-	if err != nil {
-		return err
+	}); err != nil {
+		return false, err
 	}
 
-	if !currentReplicaSetIsAvailable(rsList, conf.DeploymentRevision) {
-		return nil
-	}
+	currentIsAvailable := currentReplicaSetIsAvailable(rsList, conf.DeploymentRevision)
 
 	var errs []error
+	pending := false
 	for _, rs := range rsList.Items {
-		rsRevision := rs.Annotations[config.RevisionAnnotation]
-		if rsRevision == conf.DeploymentRevision {
+		if rs.Annotations[config.RevisionAnnotation] == conf.DeploymentRevision {
+			continue
+		}
+		if hasReplicas(rs) || resourceIsUsedByOtherReplicaSet(rsList, rs) {
+			continue
+		}
+		if rs.Annotations[config.ResourceSuffixAnnotation] == conf.ResourceName {
 			continue
 		}
 
-		if !hasReplicas(rs) && !resourceIsUsedByOtherReplicaSet(rsList, rs) {
-			if err := deleteResourcesForReplicaSet(ctx, c, &rs); err != nil {
-				// don't stop loop if deletion fails, collect errors and join them later
-				errs = append(errs, err)
-			}
+		if !currentIsAvailable {
+			pending = pending || replicaSetHasResources(ctx, c, &rs)
+			continue
+		}
+
+		if err := deleteResourcesForReplicaSet(ctx, c, &rs); err != nil {
+			errs = append(errs, err)
 		}
 	}
 
-	return errors.Join(errs...)
+	return pending, errors.Join(errs...)
+}
+
+func replicaSetHasResources(ctx context.Context, c client.Client, rs *appsv1.ReplicaSet) bool {
+	logger := logf.FromContext(ctx)
+	name := types.NamespacedName{
+		Name:      rs.Annotations[config.ResourceSuffixAnnotation],
+		Namespace: rs.Namespace,
+	}
+	if name.Name == "" {
+		return false
+	}
+
+	if err := c.Get(ctx, name, &avp.AzureVolumePopulator{}); err == nil {
+		return true
+	} else if !k8serrors.IsNotFound(err) {
+		logger.Error(err, "Failed to check AzureVolumePopulator existence during cleanup gating", "replicaSet", rs.Name)
+		return true
+	}
+
+	if err := c.Get(ctx, name, &corev1.PersistentVolumeClaim{}); err == nil {
+		return true
+	} else if !k8serrors.IsNotFound(err) {
+		logger.Error(err, "Failed to check PVC existence during cleanup gating", "replicaSet", rs.Name)
+		return true
+	}
+
+	return false
 }
 
 func deleteResourcesForReplicaSet(ctx context.Context, c client.Client, rs *appsv1.ReplicaSet) error {
